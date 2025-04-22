@@ -7,7 +7,7 @@ import networkx
 import matplotlib.pyplot as plt
 # from networkx.drawing.nx_pydot import graphviz_layout
 
-from sage.all import scatter_plot, circle, text, InteractiveLPProblemStandardForm, matrix, vector, RR, QQ, arrow, show
+from sage.all import scatter_plot, circle, text, InteractiveLPProblemStandardForm, matrix, vector, RR, QQ, arrow, show, MixedIntegerLinearProgram
 
 
 import networkx as nx
@@ -147,7 +147,8 @@ class Coords:
 
         assert is_binary(P)
 
-        x = [P.x()[i] for i, v in enumerate(P.optimal_solution()) if v == 1.0]
+        solution, _ = solve_as_mixed_integer(P)       
+        x = [P.x()[i] for i, v in enumerate(solution) if v == 1.0]
 
         edges = self.plot()
 
@@ -161,12 +162,47 @@ class Coords:
 
         print_solution(P)
 
+        
+def as_mixed_integer(P):
+    lp = MixedIntegerLinearProgram(maximization=True)
 
+    A, b, c, variables = P.standard_form().Abcx()
+    x = lp.new_variable(nonnegative=True)
+
+    lp.set_objective(sum(x[v] * c for v, c in zip(variables, c)))
+
+    for i, row in enumerate(A):
+        lp.add_constraint(sum(x[v] * a for v, a in zip(variables, row)) <= b[i])
+
+    return lp, x
+
+def solve_as_mixed_integer(P):
+    lp, x = as_mixed_integer(P)
+    lp.solve()
+    return tuple(lp.get_values(x).values()), lp.get_objective_value()
+   
+
+def is_feasible_as_mixed_integer(P):
+    lp, _ = as_mixed_integer(P)
+    try:
+        solution = lp.solve()
+        if solution is None:
+            return False
+        return True
+    except Exception as e:
+        if "no feasible solution" in str(e):
+            return False
+        else:
+            print("Error occured in lp.sovle()")
+            return False
+            
 def print_solution(P):
     """Print a solution of TSP LP."""
 
-    x = [P.x()[i] for i, v in enumerate(P.optimal_solution()) if v == 1.0]
-    for i, v in enumerate(P.optimal_solution()):
+    solution, _ = solve_as_mixed_integer(P)
+    x = [P.x()[i] for i, v in enumerate(solution) if v == 1.0]
+   
+    for i, v in enumerate(solution):
         if v == 0.0:
             continue
 
@@ -214,7 +250,8 @@ def remove_subtour(P, subtour):
 def is_binary(P):
     """Check if all variables in the solution are binary."""
 
-    return all([x == 0.0 or x == 1.0 for x in P.optimal_solution()])
+    solution, _ = solve_as_mixed_integer(P)
+    return all([x == 0.0 or x == 1.0 for x in solution])
 
 
 def find_subtours(P):
@@ -228,6 +265,8 @@ def find_subtours(P):
 
     tours = []
 
+    solution, _ = solve_as_mixed_integer(P)
+    
     while cities:
         starting_city = cities.pop()
         tour = [starting_city]
@@ -239,7 +278,7 @@ def find_subtours(P):
             for i in range(N):
                 if i == city:
                     continue
-                if P.optimal_solution()[x(P, city, i)] == 1.0:
+                if solution[x(P, city, i)] == 1.0:
                     next_city = i
                     break
             assert next_city is not None
@@ -305,28 +344,33 @@ def gomory_cut(P, v):
 
 
 def problem_description(P, verbose=True):
-    if not P.is_feasible():
+    if not is_feasible_as_mixed_integer(P):
         return 'INFEASIBLE' if verbose else 'INFEAS'
+
+    solution, value = solve_as_mixed_integer(P)
+    
     if is_binary(P):
         if len(find_subtours(P)) > 1:
-            return 'BINARY MULTIPLE SUBTOURS' if verbose else f'MULT {float(-P.optimal_value()):.3f}'
+            return f'BINARY MULTIPLE SUBTOURS {-value}' if verbose else f'MULT {float(-value):.3f}'
         else:
-            return f'BINARY FEASIBLE {-P.optimal_value()}' if verbose else f'FEAS {float(-P.optimal_value()):.3f}'
+            return f'BINARY FEASIBLE {-value}' if verbose else f'FEAS {float(-value):.3f}'
     else:
-        return f'FRACTIONAL {-P.optimal_value()}' if verbose else f'FRAC {float(-P.optimal_value()):.3f}'
+        return f'FRACTIONAL {-value}' if verbose else f'FRAC {float(-value):.3f}'
 
 
 class Tree:
-    def __init__(self, coords):
+    def __init__(self, coords, width=20, height=10):
         self.coords = coords
         P = coords.linear_problem()
         self.G = networkx.DiGraph()
         self.G.add_node(0)
         self.G.nodes[0]['label'] = f'0 -> {problem_description(P, False)}'
         self.G.nodes[0]['problem'] = P
-
+        self.width = width
+        self.height = height
+        
     def plot(self):
-        plt.figure(figsize=(20,10))
+        plt.figure(figsize=(self.width, self.height))
         # pos=graphviz_layout(self.G, prog='twopi')
         # pos = networkx.kamada_kawai_layout(self.G)
         pos = hierarchy_pos(self.G.reverse(), 0)
@@ -409,8 +453,9 @@ class Tree:
         """Gomory cut on first fractional variable of the original problem."""
 
         P = self.G.nodes[v]['problem']
+        solution, _ = solve_as_mixed_integer(P)
         P1 = P
-        for variable, value in zip(P.x(), P.optimal_solution()):
+        for variable, value in zip(P.x(), solution):
             if value > epsilon and value < 1.0 - epsilon:
                 print(f'Cutting on {variable} value {value}', P1.final_dictionary().basic_variables())
                 P1 = self._gomory_cut(P1, str(variable))
